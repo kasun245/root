@@ -199,5 +199,218 @@ BEGIN
 END;
 /
 
+-----------------------------------------------------------------------------
+-----------------------------------------------------------------------------
+----------------CORRECT ABOVE...........................
+CREATE OR REPLACE PACKAGE pkg_dept_info IS
+    -- Record type
+    TYPE rec_emp IS RECORD (
+        emp_id        employees.employee_id%TYPE,
+        first_name    employees.first_name%TYPE,
+        last_name     employees.last_name%TYPE,
+        department_id employees.department_id%TYPE,
+        hire_date     employees.hire_date%TYPE,
+        mng_level     VARCHAR2(30)
+    );
+    -- Index-by table type
+    TYPE itbl_emp IS TABLE OF rec_emp INDEX BY BINARY_INTEGER;
+    -- Global variable (accessible in package body + functions)
+    vtyp_tbl itbl_emp;
+    -- Procedure declaration
+    PROCEDURE proc_load_mgrs(p_years NUMBER);
+    -- Function declaration (returns a count, not the whole table)
+    FUNCTION func_count_mgrs RETURN NUMBER;
+END pkg_dept_info;
+/
 
 
+--correct body--------------------------------------------------------
+CREATE OR REPLACE PACKAGE BODY PKG_DEPT_INFO IS
+CURSOR CUR_LONG_MGRS(p_years NUMBER) IS
+SELECT e.employee_id,e.first_name, e.last_name, e.department_id, e.hire_date,
+CASE
+WHEN TRUNC(MONTHS_BETWEEN(SYSDATE, e.hire_date)/12) BETWEEN 10 AND 15 THEN 'Level 1'
+WHEN TRUNC(MONTHS_BETWEEN(SYSDATE, e.hire_date)/12) BETWEEN 15 AND 20 THEN 'Level 2'
+ELSE 'Level 3'
+END AS mng_level
+FROM employees e
+WHERE TRUNC(MONTHS_BETWEEN(SYSDATE, e.hire_date)/12)>p_years;
+
+PROCEDURE PROC_LOAD_MGRS(p_years NUMBER) IS
+    v_rec rec_emp;
+    i INTEGER := 0;
+BEGIN
+    FOR v_rec IN CUR_LONG_MGRS(p_years) LOOP
+        
+        -- Insert ALL managers into the table
+        INSERT INTO long_term_managers
+            (emp_id, first_name, last_name, department_id, hire_date, mng_level)
+        VALUES
+            (v_rec.employee_id,
+             v_rec.first_name,
+             v_rec.last_name,
+             v_rec.department_id,
+             v_rec.hire_date,
+             v_rec.mng_level);
+
+        -- Only add Level 3 managers to the PL/SQL index-by table
+        IF v_rec.mng_level = 'Level 3' THEN
+            i := i + 1;
+            vtyp_tbl(i).emp_id        := v_rec.employee_id;
+            vtyp_tbl(i).first_name    := INITCAP(v_rec.first_name);
+            vtyp_tbl(i).last_name     := INITCAP(v_rec.last_name);
+            vtyp_tbl(i).department_id := v_rec.department_id;
+            vtyp_tbl(i).hire_date     := v_rec.hire_date;
+            vtyp_tbl(i).mng_level     := v_rec.mng_level;
+        END IF;
+    END LOOP;
+    COMMIT;
+END PROC_LOAD_MGRS;
+
+FUNCTION FUNC_COUNT_MGRS RETURN NUMBER IS
+vcount NUMBER:=0;
+BEGIN
+vcount:=vtyp_tbl.COUNT;
+DBMS_OUTPUT.PUT_LINE('Long-term Managers:');
+        FOR i IN 1 .. vtyp_tbl.COUNT LOOP
+            DBMS_OUTPUT.PUT_LINE(vtyp_tbl(i).first_name || ' ' || vtyp_tbl(i).last_name);
+        END LOOP;
+RETURN vcount;
+END FUNC_COUNT_MGRS;
+END PKG_DEPT_INFO;
+/
+
+--check output---------------------
+BEGIN
+    pkg_dept_info.proc_load_mgrs(20);  -- load managers >20 years
+END;
+/
+SELECT * FROM long_term_managers WHERE mng_level='Level 2';
+DECLARE
+    vcount NUMBER;
+BEGIN
+    vcount := pkg_dept_info.func_count_mgrs;
+    DBMS_OUTPUT.PUT_LINE('Total managers: ' || vcount);
+END;
+/
+Q2)------------------------------------------------
+CREATE OR REPLACE PROCEDURE PROC_EMP_BONUS_UPDATE
+(
+    p_emp_id employees.employee_id%TYPE,
+    p_bonus  NUMBER
+) IS
+    EX1_BONUS_LIMIT EXCEPTION;
+    EX2_OVERFLOW    EXCEPTION;
+    PRAGMA EXCEPTION_INIT(EX2_OVERFLOW, -6502);
+
+    v_comm_pct  employees.commission_pct%TYPE;
+    v_dep_name  departments.department_name%TYPE;
+BEGIN
+    SELECT e.commission_pct, d.department_name
+    INTO   v_comm_pct, v_dep_name
+    FROM   employees e
+           JOIN departments d 
+           ON e.department_id = d.department_id
+    WHERE  e.employee_id = p_emp_id;
+
+    -- Check if department is Sales
+    IF UPPER(v_dep_name) = 'Sales' THEN
+        v_comm_pct := NVL(v_comm_pct, 0) + p_bonus;
+
+        -- Check commission exceeds limit
+        IF v_comm_pct > 0.5 THEN
+            RAISE EX1_BONUS_LIMIT;
+        END IF;
+
+        -- Update employee record
+        UPDATE employees
+        SET commission_pct = v_comm_pct
+        WHERE employee_id = p_emp_id;
+
+        DBMS_OUTPUT.PUT_LINE('Commission updated successfully.');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE('Employee is not in Sales department. No update performed.');
+    END IF;
+
+EXCEPTION
+    WHEN NO_DATA_FOUND THEN
+        DBMS_OUTPUT.PUT_LINE('Error: Employee not found.');
+
+    WHEN EX1_BONUS_LIMIT THEN
+        DBMS_OUTPUT.PUT_LINE('Bonus exceeds allowable limit for commission.');
+
+    WHEN EX2_OVERFLOW THEN
+        DBMS_OUTPUT.PUT_LINE('Commission overflow error – value too large.');
+
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Unexpected error: ' || SQLERRM);
+END PROC_EMP_BONUS_UPDATE;
+/
+SET SERVEROUTPUT ON;
+
+SELECT e.commission_pct, d.department_name, e.employee_id
+FROM   employees e
+JOIN departments d ON e.department_id = d.department_id
+WHERE  d.department_name = 'Sales';
+
+BEGIN
+PROC_EMP_BONUS_UPDATE(103,0.4);
+END;
+/
+--Q3-----------------------------------------
+CREATE TABLE emp_audit ( 
+audit_id	NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, 
+emp_id		NUMBER(6), 
+first_name	VARCHAR2(20), 
+last_name	VARCHAR2(25), 
+deleted_by	VARCHAR2(30), 
+deleted_on	DATE); 
+--b
+CREATE OR REPLACE TRIGGER trig_audit_delete
+AFTER DELETE ON employees
+FOR EACH ROW
+BEGIN
+INSERT INTO emp_audit (emp_id, first_name, last_name, deleted_by, deleted_on)
+    VALUES (:OLD.employee_id, :OLD.first_name, :OLD.last_name, USER, SYSDATE);
+END;
+/
+--c-------
+CREATE OR REPLACE TRIGGER TRIG_PROTECT_HR
+BEFORE INSERT OR UPDATE OR DELETE ON employees
+FOR EACH ROW
+DECLARE
+v_dept_name departments.department_name%TYPE;
+BEGIN
+IF INSERTING OR UPDATING THEN
+SELECT department_name
+INTO v_dept_name
+FROM departments
+WHERE department_id = :NEW.department_id;
+ELSE
+SELECT department_name
+INTO v_dept_name
+FROM departments
+WHERE department_id = :OLD.department_id;
+END IF;
+IF v_dept_name = 'Human Resources' THEN
+        RAISE_APPLICATION_ERROR(-20001, 'DML operations on Human Resources staff are restricted.');
+    END IF;
+END;
+/
+--d---------------------------------
+CREATE TABLE job_change_log (
+emp_id        NUMBER(6),
+old_job_id    VARCHAR2(10),
+new_job_id    VARCHAR2(10),
+changed_on    DATE
+);
+
+CREATE OR REPLACE TRIGGER trig_log_job_change
+AFTER UPDATE OF job_id ON employees
+FOR EACH ROW
+WHEN (OLD.job_id <> NEW.job_id)   -- only if job_id changed
+BEGIN
+    INSERT INTO job_change_log (emp_id, old_job_id, new_job_id, changed_on)
+    VALUES (:OLD.employee_id, :OLD.job_id, :NEW.job_id, SYSDATE);
+END;
+/
