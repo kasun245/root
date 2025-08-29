@@ -1,1 +1,203 @@
-"# root" 
+-assignment 01
+Q1
+------------------correct
+CREATE OR REPLACE PACKAGE PKG_INFO IS
+  -- Record type for employees
+  TYPE REC_EMP IS RECORD(
+     employee_id employees.employee_id%TYPE,
+     full_name   VARCHAR2(100),
+     service     NUMBER,
+     sal_before  employees.salary%TYPE,
+     sal_after   NUMBER,
+     manager_id  employees.manager_id%TYPE
+  );
+
+  -- Index-by table type
+  TYPE iTBL_EMP IS TABLE OF REC_EMP INDEX BY BINARY_INTEGER;
+  vtyp_tbl iTBL_EMP;
+
+  -- Procedure to load employees into index-by table
+  PROCEDURE PROC_EMP(p_dept_id employees.department_id%TYPE);
+
+  -- Function to return employees from index-by table
+  FUNCTION FUNC_EMP RETURN iTBL_EMP;
+
+END PKG_INFO;
+/
+
+--package body
+
+CREATE OR REPLACE PACKAGE BODY PKG_INFO IS
+
+  CURSOR CUR_EMP(p_dept_id employees.department_id%TYPE) IS
+    SELECT e.employee_id,
+           e.first_name ||' '|| e.last_name AS full_name,
+           TRUNC(MONTHS_BETWEEN(SYSDATE, e.hire_date)/12) AS service,
+           e.salary AS sal_before,
+           CASE 
+             WHEN TRUNC(MONTHS_BETWEEN(SYSDATE,e.hire_date)/12) < 10
+               THEN e.salary * 1.05
+             WHEN TRUNC(MONTHS_BETWEEN(SYSDATE,e.hire_date)/12) BETWEEN 10 AND 20
+               THEN e.salary * 1.075
+             ELSE e.salary * 1.10
+           END AS sal_after,
+           e.manager_id
+    FROM employees e
+    WHERE e.department_id = p_dept_id;
+
+  PROCEDURE PROC_EMP(p_dept_id employees.department_id%TYPE) IS
+    v_rec REC_EMP;
+    i INTEGER := 0;
+  BEGIN
+    vtyp_tbl.DELETE;
+    FOR v_rec IN CUR_EMP(p_dept_id) LOOP
+      i := i + 1;
+      vtyp_tbl(i) := v_rec;
+    END LOOP;
+  END PROC_EMP;
+
+  FUNCTION FUNC_EMP RETURN iTBL_EMP IS
+  BEGIN
+    RETURN vtyp_tbl;
+  END FUNC_EMP;
+
+END PKG_INFO;
+/
+
+set serveroutput on;
+DECLARE
+  v_tab PKG_INFO.iTBL_EMP;
+BEGIN
+  -- Load employees of department 50
+  PKG_INFO.PROC_EMP(50);
+
+  -- Fetch loaded data
+  v_tab := PKG_INFO.FUNC_EMP;
+
+
+  -- Display
+  FOR i IN v_tab.FIRST .. v_tab.LAST LOOP
+    DBMS_OUTPUT.PUT_LINE(
+      'ID: ' || v_tab(i).employee_id ||
+      ' Name: ' || v_tab(i).full_name ||
+      ' Service: ' || v_tab(i).service || ' years' ||
+      ' Salary Before: ' || v_tab(i).sal_before ||
+      ' Salary After: ' || v_tab(i).sal_after ||
+      ' Manager: ' || v_tab(i).manager_id
+    );
+  END LOOP;
+END;
+/
+
+Q2)------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE PROC_EMP_UPDATE(
+p_emp_id IN EMPLOYEES.EMPLOYEE_ID%TYPE,
+p_dept_id IN EMPLOYEES.DEPARTMENT_ID%TYPE
+) IS
+-- User-defined exceptions
+
+	EX1_UPDATE EXCEPTION; -- President role update restriction
+	EX2_UPDATE EXCEPTION; -- Invalid foreign key (non-existent department)
+
+-- Map ORA-02291 to EX2_UPDATE
+
+	PRAGMA EXCEPTION_INIT(EX2_UPDATE, -2291);
+
+-- Variables
+	v_job_title JOBS.JOB_TITLE%TYPE;
+
+BEGIN
+-- Fetch job title of the employee (JOIN with JOBS table)
+
+SELECT j.job_title
+INTO v_job_title
+FROM EMPLOYEES e
+JOIN JOBS j ON e.job_id = j.job_id
+WHERE e.employee_id = p_emp_id;
+
+-- If employee is President, raise EX1_UPDATE
+
+IF UPPER(v_job_title) LIKE '%PRESIDENT%' THEN
+RAISE EX1_UPDATE;
+END IF;
+
+-- Update department ID
+
+		UPDATE EMPLOYEES
+		SET department_id = p_dept_id
+		WHERE employee_id = p_emp_id;
+		DBMS_OUTPUT.PUT_LINE('Employee department updated successfully.');
+EXCEPTION
+WHEN NO_DATA_FOUND THEN
+DBMS_OUTPUT.PUT_LINE('Employee not found.');
+WHEN EX1_UPDATE THEN
+DBMS_OUTPUT.PUT_LINE('The department id of a president cannot be updated.');
+WHEN EX2_UPDATE THEN
+DBMS_OUTPUT.PUT_LINE('This department is not existing.');
+WHEN OTHERS THEN
+DBMS_OUTPUT.PUT_LINE('An unexpected error occurred: ' || SQLERRM);
+END PROC_EMP_UPDATE;
+/
+
+q2----------check output--------------
+SET SERVEROUTPUT ON;
+BEGIN
+    PROC_EMP_UPDATE(100, 90);  -- Assuming employee 100 has job 'President'
+END;
+/
+
+
+q3----------------------------------------
+
+CREATE TABLE E_COPY AS
+SELECT*FROM EMPLOYEES;
+
+
+CREATE OR REPLACE TRIGGER TRIG_EMP
+BEFORE INSERT OR UPDATE OR DELETE ON E_COPY
+BEGIN
+IF TO_CHAR(SYSDATE, 'DY') IN ('SAT', 'SUN') OR
+(TO_CHAR(SYSDATE, 'HH24:MI') NOT BETWEEN '08:30' AND '16:30') THEN
+RAISE_APPLICATION_ERROR(-20001, 'Changes allowed only during business hours (Mon–Fri, 8:30–16:30)');
+END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER TRIG_UPDATE_SAL
+BEFORE UPDATE ON E_COPY
+FOR EACH ROW
+BEGIN
+IF :NEW.salary > :OLD.salary * 1.2 THEN
+RAISE_APPLICATION_ERROR(-20002, 'Salary cannot be increased by more than 20%');
+END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER TRIG_SEQ
+BEFORE INSERT ON E_COPY
+FOR EACH ROW
+BEGIN
+SELECT SEQ_EMP.NEXTVAL INTO :NEW.employee_id FROM dual;
+:NEW.first_name := INITCAP(:NEW.first_name);
+:NEW.last_name := INITCAP(:NEW.last_name);
+END;
+/
+
+----------
+CREATE OR REPLACE TRIGGER TRIG_SEQ
+BEFORE INSERT ON E_COPY
+FOR EACH ROW
+BEGIN
+
+    -- Auto-generate Employee ID from sequence
+    :NEW.employee_id := SEQ_EMP.NEXTVAL;
+
+    -- Format names (First letter upper-case, rest lower-case)
+    :NEW.first_name := INITCAP(:NEW.first_name);
+    :NEW.last_name  := INITCAP(:NEW.last_name);
+END;
+/
+
+
+
